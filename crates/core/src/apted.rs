@@ -110,7 +110,8 @@ fn compute_edit_distance_recursive(
         rename_plus_cost += alignment_cost;
     }
 
-    let min_cost = delete_all_cost.min(insert_all_cost).min(rename_plus_cost);
+    // Replacing a subtree must account for both removing it and constructing its replacement.
+    let min_cost = (delete_all_cost + insert_all_cost).min(rename_plus_cost);
     memo.insert(key, min_cost);
     min_cost
 }
