@@ -3,6 +3,7 @@
 use crate::generic_parser_config::GenericParserConfig;
 use crate::language_parser::{GenericFunctionDef, GenericTypeDef, Language, LanguageParser};
 use crate::tree::TreeNode;
+use std::collections::HashMap;
 use std::error::Error;
 use std::rc::Rc;
 use tree_sitter::{Node, Parser};
@@ -10,6 +11,11 @@ use tree_sitter::{Node, Parser};
 pub struct GenericTreeSitterParser {
     parser: Parser,
     config: GenericParserConfig,
+}
+
+pub struct GenericFunctionBody {
+    pub definition: GenericFunctionDef,
+    pub tree: Rc<TreeNode>,
 }
 
 impl GenericTreeSitterParser {
@@ -52,11 +58,26 @@ impl GenericTreeSitterParser {
     }
 
     fn convert_node(&self, node: Node, source: &str, id_counter: &mut usize) -> TreeNode {
+        self.convert_body_node(node, source, id_counter, false, &HashMap::new())
+    }
+
+    fn convert_body_node(
+        &self,
+        node: Node,
+        source: &str,
+        id_counter: &mut usize,
+        skip_comments: bool,
+        local_names: &HashMap<usize, String>,
+    ) -> TreeNode {
         let current_id = *id_counter;
         *id_counter += 1;
 
         let label = node.kind().to_string();
-        let value = if self.config.value_nodes.contains(&node.kind().to_string()) {
+        let value = if let Some(name) =
+            local_names.get(&node.start_byte()).filter(|_| node.kind() == "identifier")
+        {
+            name.clone()
+        } else if self.config.value_nodes.contains(&node.kind().to_string()) {
             node.utf8_text(source.as_bytes()).unwrap_or("").to_string()
         } else {
             "".to_string()
@@ -65,11 +86,76 @@ impl GenericTreeSitterParser {
         let mut tree_node = TreeNode::new(label, value, current_id);
 
         for child in node.children(&mut node.walk()) {
-            let child_node = self.convert_node(child, source, id_counter);
+            if skip_comments && child.kind() == "comment" {
+                continue;
+            }
+            let child_node =
+                self.convert_body_node(child, source, id_counter, skip_comments, local_names);
             tree_node.add_child(Rc::new(child_node));
         }
 
         tree_node
+    }
+
+    pub fn extract_go_function_bodies(
+        &mut self,
+        source: &str,
+        filename: &str,
+    ) -> Result<Vec<GenericFunctionBody>, Box<dyn Error + Send + Sync>> {
+        let tree = self.parser.parse(source, None).ok_or_else(|| {
+            std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                format!("Failed to parse {filename}"),
+            )
+        })?;
+        if tree.root_node().has_error() {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                format!("Invalid Go syntax in {filename}"),
+            )
+            .into());
+        }
+        let mut pending = vec![tree.root_node()];
+        let mut bodies = Vec::new();
+        while let Some(node) = pending.pop() {
+            if self.config.function_nodes.iter().any(|kind| kind == node.kind()) {
+                if let Some(body) = node.child_by_field_name(&self.config.field_mappings.body_field)
+                {
+                    let executable =
+                        body.named_children(&mut body.walk()).any(|n| n.kind() != "comment");
+                    if executable {
+                        if let Some(mut definition) =
+                            self.extract_function_definition(node, source, None)
+                        {
+                            if let Some(receiver) = node.child_by_field_name("receiver") {
+                                let parameter = receiver.named_child(0);
+                                definition.class_name = parameter
+                                    .and_then(|n| n.child_by_field_name("type"))
+                                    .and_then(|n| n.utf8_text(source.as_bytes()).ok())
+                                    .map(String::from);
+                                definition.is_method = true;
+                            }
+                            let mut id = 0;
+                            let local_names = crate::go_local_bindings::local_names(node, source);
+                            bodies.push(GenericFunctionBody {
+                                definition,
+                                tree: Rc::new(self.convert_body_node(
+                                    body,
+                                    source,
+                                    &mut id,
+                                    true,
+                                    &local_names,
+                                )),
+                            });
+                        }
+                    }
+                }
+            } else {
+                let children: Vec<_> = node.named_children(&mut node.walk()).collect();
+                pending.extend(children.into_iter().rev());
+            }
+        }
+        Ok(bodies)
     }
 
     fn extract_functions_from_node(

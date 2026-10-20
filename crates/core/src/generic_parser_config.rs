@@ -212,8 +212,11 @@ impl GenericParserConfig {
             },
             value_nodes: vec![
                 "identifier".to_string(),
+                "field_identifier".to_string(),
                 "interpreted_string_literal".to_string(),
                 "raw_string_literal".to_string(),
+                "rune_literal".to_string(),
+                "imaginary_literal".to_string(),
                 "int_literal".to_string(),
                 "float_literal".to_string(),
                 "true".to_string(),

@@ -13,6 +13,7 @@ pub mod function_extractor;
 pub mod generic_overlap_detector;
 pub mod generic_parser_config;
 pub mod generic_tree_sitter_parser;
+mod go_local_bindings;
 mod ignore_directive;
 pub mod language_parser;
 pub mod overlap_detector;

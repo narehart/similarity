@@ -6,7 +6,8 @@ use similarity_core::language_parser::LanguageParser;
 use similarity_core::tsed::{calculate_tsed, TSEDOptions};
 use similarity_core::APTEDOptions;
 use std::fs;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
+use std::process::ExitCode;
 
 // Include auto-generated language configs
 include!(concat!(env!("OUT_DIR"), "/language_configs.rs"));
@@ -17,7 +18,11 @@ include!(concat!(env!("OUT_DIR"), "/language_configs.rs"));
 struct Cli {
     /// Path to analyze
     #[arg(required_unless_present_any = ["supported", "show_config"])]
-    path: Option<PathBuf>,
+    path: Vec<PathBuf>,
+
+    /// Return 1 for clones and 2 for operational errors (default remains report-only)
+    #[arg(long)]
+    fail_on_violation: bool,
 
     /// Language configuration file (JSON)
     #[arg(short, long, conflicts_with_all = ["language", "supported", "show_config"])]
@@ -60,8 +65,23 @@ struct Cli {
     overlap_size_tolerance: f64,
 }
 
-fn main() -> Result<()> {
+fn main() -> ExitCode {
     let cli = Cli::parse();
+    let fail = cli.fail_on_violation;
+    match run(cli) {
+        Ok(matches) if fail && matches > 0 => ExitCode::from(1),
+        Ok(_) => ExitCode::SUCCESS,
+        Err(error) => {
+            eprintln!("{error:#}");
+            ExitCode::from(if fail { 2 } else { 1 })
+        }
+    }
+}
+
+fn run(cli: Cli) -> Result<usize> {
+    if !cli.threshold.is_finite() || !(0.0..=1.0).contains(&cli.threshold) {
+        anyhow::bail!("Threshold must be a finite number between 0 and 1");
+    }
 
     // Handle --supported option
     if cli.supported {
@@ -77,7 +97,7 @@ fn main() -> Result<()> {
         println!("  similarity-py  - Optimized Python analyzer");
         println!("  similarity-ts  - Optimized TypeScript/JavaScript analyzer");
         println!("  similarity-rs  - (future) Optimized Rust analyzer");
-        return Ok(());
+        return Ok(0);
     }
 
     // Handle --show-config option
@@ -99,11 +119,11 @@ fn main() -> Result<()> {
 
         let json = serde_json::to_string_pretty(&config)?;
         println!("{json}");
-        return Ok(());
+        return Ok(0);
     }
 
     // Normal parsing mode
-    let path = cli.path.ok_or_else(|| anyhow::anyhow!("Path is required"))?;
+    let path = cli.path.first().ok_or_else(|| anyhow::anyhow!("Path is required"))?.clone();
 
     let config = if let Some(config_path) = &cli.config {
         GenericParserConfig::from_file(config_path)
@@ -171,6 +191,13 @@ fn main() -> Result<()> {
 
     let mut parser = GenericTreeSitterParser::new(language, config.clone())
         .map_err(|e| anyhow::anyhow!("Failed to create parser: {}", e))?;
+
+    if config.language == "go" && !cli.overlap {
+        return compare_go_files(&mut parser, &cli.path, cli.threshold, cli.show_functions);
+    }
+    if cli.path.len() != 1 {
+        anyhow::bail!("Multiple input files are supported only for Go function comparison");
+    }
 
     // Read file
     let content = fs::read_to_string(&path)?;
@@ -251,7 +278,80 @@ fn main() -> Result<()> {
         }
     }
 
-    Ok(())
+    Ok(0)
+}
+
+fn compare_go_files(
+    parser: &mut GenericTreeSitterParser,
+    paths: &[PathBuf],
+    threshold: f64,
+    show_functions: bool,
+) -> Result<usize> {
+    let mut paths = paths.iter().map(fs::canonicalize).collect::<std::io::Result<Vec<_>>>()?;
+    paths.sort();
+    paths.dedup();
+    let mut functions = Vec::new();
+    for path in paths {
+        let source = fs::read_to_string(&path)?;
+        let bodies = parser
+            .extract_go_function_bodies(&source, &path.to_string_lossy())
+            .map_err(|error| anyhow::anyhow!("{error}"))?;
+        if show_functions {
+            let inventory = parser
+                .extract_functions(&source, &path.to_string_lossy())
+                .map_err(|error| anyhow::anyhow!("{error}"))?;
+            println!("Found {} functions:", inventory.len());
+            for function in inventory {
+                println!(
+                    "  {} {}:{}-{}",
+                    function.name,
+                    path.display(),
+                    function.start_line,
+                    function.end_line
+                );
+            }
+            println!();
+        }
+        functions.extend(bodies.into_iter().map(|body| (path.clone(), body)));
+    }
+    let options = TSEDOptions {
+        apted_options: APTEDOptions {
+            rename_cost: 0.3,
+            delete_cost: 1.0,
+            insert_cost: 1.0,
+            compare_values: true,
+        },
+        min_lines: 1,
+        min_tokens: None,
+        size_penalty: false,
+        skip_test: false,
+    };
+    let mut matches = 0;
+    for (i, (left_path, left)) in functions.iter().enumerate() {
+        for (right_path, right) in &functions[i + 1..] {
+            let score = calculate_tsed(&left.tree, &right.tree, &options);
+            if score >= threshold {
+                println!(
+                    "  {} <-> {}: {:.2}% ({} <-> {})",
+                    left.definition.name,
+                    right.definition.name,
+                    score * 100.0,
+                    function_location(left_path, &left.definition),
+                    function_location(right_path, &right.definition)
+                );
+                matches += 1;
+            }
+        }
+    }
+    Ok(matches)
+}
+
+fn function_location(
+    path: &Path,
+    function: &similarity_core::language_parser::GenericFunctionDef,
+) -> String {
+    let receiver = function.class_name.as_ref().map(|name| format!("{name}.")).unwrap_or_default();
+    format!("{}:{} {}{}", path.display(), function.start_line, receiver, function.name)
 }
 
 fn extract_function_body(lines: &[&str], start_line: u32, end_line: u32) -> String {

@@ -15,8 +15,11 @@
   },
   "value_nodes": [
     "identifier",
+    "field_identifier",
     "interpreted_string_literal",
     "raw_string_literal",
+    "rune_literal",
+    "imaginary_literal",
     "int_literal",
     "float_literal",
     "true",
