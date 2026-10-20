@@ -103,20 +103,7 @@ fn statement_to_tree_node(stmt: &Statement, id_counter: &mut usize) -> Option<Rc
             Some(Rc::new(node))
         }
         Statement::ReturnStatement(ret_stmt) => {
-            let mut node = TreeNode::new(
-                "ReturnStatement".to_string(),
-                "ReturnStatement".to_string(),
-                *id_counter,
-            );
-            *id_counter += 1;
-
-            if let Some(arg) = &ret_stmt.argument {
-                if let Some(arg_node) = expression_to_tree_node(arg, id_counter) {
-                    node.add_child(arg_node);
-                }
-            }
-
-            Some(Rc::new(node))
+            Some(return_expression_to_tree_node(ret_stmt.argument.as_ref(), id_counter))
         }
         _ => {
             // For other statement types, create a generic node
@@ -125,6 +112,21 @@ fn statement_to_tree_node(stmt: &Statement, id_counter: &mut usize) -> Option<Rc
             Some(Rc::new(node))
         }
     }
+}
+
+fn return_expression_to_tree_node(
+    argument: Option<&Expression>,
+    id_counter: &mut usize,
+) -> Rc<TreeNode> {
+    let mut node =
+        TreeNode::new("ReturnStatement".to_string(), "ReturnStatement".to_string(), *id_counter);
+    *id_counter += 1;
+    if let Some(argument) = argument {
+        if let Some(argument) = expression_to_tree_node(argument, id_counter) {
+            node.add_child(argument);
+        }
+    }
+    Rc::new(node)
 }
 
 fn declaration_to_tree_node(decl: &Declaration, id_counter: &mut usize) -> Option<Rc<TreeNode>> {
@@ -318,16 +320,22 @@ fn expression_to_tree_node(expr: &Expression, id_counter: &mut usize) -> Option<
 
             // Add body
             if arrow.expression {
-                // Expression body (e.g., => x + 1)
+                // A concise arrow implicitly returns its expression.
+                let mut body = TreeNode::new(
+                    "BlockStatement".to_string(),
+                    "BlockStatement".to_string(),
+                    *id_counter,
+                );
+                *id_counter += 1;
                 if let Some(Statement::ExpressionStatement(expr_stmt)) =
                     arrow.body.statements.first()
                 {
-                    if let Some(expr_node) =
-                        expression_to_tree_node(&expr_stmt.expression, id_counter)
-                    {
-                        node.add_child(expr_node);
-                    }
+                    body.add_child(return_expression_to_tree_node(
+                        Some(&expr_stmt.expression),
+                        id_counter,
+                    ));
                 }
+                node.add_child(Rc::new(body));
             } else {
                 // Block body (e.g., => { return x + 1; })
                 if let Some(body_node) = function_body_to_tree_node(&arrow.body, id_counter) {
